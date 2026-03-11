@@ -1,3 +1,6 @@
-/.idea/
-/.idea
-/idea/
+.idea/
+.idea
+.env
+config.yaml
+data/
+feature.txt

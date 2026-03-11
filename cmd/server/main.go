@@ -1,159 +1,130 @@
 package main
 
 import (
-	"encoding/json"
-	"log"
-	"net/http"
-	"os"
-	"strconv"
-	"sync"
-
+	"fmt"
+	"gennady-neural-spikes-model/cmd/config"
+	"gennady-neural-spikes-model/internal/dataset"
 	"gennady-neural-spikes-model/internal/engine"
+	"log/slog"
+	"math/rand"
 )
 
-type app struct {
-	mu sync.Mutex
-	e  *engine.Engine
-}
-
-type stepRequest struct {
-	Inputs []engine.InputSignal `json:"inputs"`
-	Steps  int                  `json:"steps"`
-}
-
-type stepResponse struct {
-	Tick      int     `json:"tick"`
-	FiredEach [][]int `json:"firedEach"`
-}
-
-type saveRequest struct {
-	Path string `json:"path"`
-}
-
 func main() {
-	neuronCount := envInt("NEURONS", 1000)
-	synapsesPerNeuron := envInt("SYNAPSES_PER_NEURON", 8)
-	randomSyn := make([]engine.SynapseDef, 0, neuronCount*synapsesPerNeuron)
-	for src := 0; src < neuronCount; src++ {
-		for i := 0; i < synapsesPerNeuron; i++ {
-			target := (src*31 + i*17 + 13) % neuronCount
-			randomSyn = append(randomSyn, engine.SynapseDef{
-				Source:  src,
-				Target:  target,
-				Weight:  10 + float64((src+i)%5),
-				Delay:   1 + (i % 4),
-				Plastic: true,
-			})
-		}
+	cfg := config.DefaultConfig()
+	if cfg.Seed == 0 {
+		cfg.Seed = int64(rand.Uint64())
+	}
+	slog.Info("Start with:", "seed", cfg.Seed)
+	brain := engine.NewEngine(cfg)
+	brain.InitSpatial3D()
+
+	if err := brain.ValidateTopology(); err != nil {
+		panic(err)
 	}
 
-	cfg := engine.Config{LeakFactor: 0.97, MinWeight: 0.1, MaxWeight: 50, LearnRate: 0.2, ForgetRate: 0.01, LearnWindowTicks: 4, ForgetAfterInactive: 40}
-	e, err := engine.NewEngine(neuronCount, randomSyn, cfg)
+	brain.PrintTopologyStats()
+	brain.PrintDelayHistogram()
+	brain.PrintOutgoingHistogram()
+
+	samples, err := dataset.Load("data")
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
+	}
+	fmt.Println("Loaded samples:", samples)
+	//_ = brain.InjectNow(0, 30)
+	//_ = brain.InjectNow(1, 18)
+	//_ = brain.InjectNow(2, 22)
+	//_ = brain.InjectNow(3, 20)
+	//_ = brain.InjectNow(4, 18)
+	//_ = brain.InjectNow(5, 30)
+	//_ = brain.InjectNow(6, 20)
+	//_ = brain.InjectNow(7, 18)
+	//_ = brain.InjectNow(8, 25)
+	//_ = brain.InjectNow(9, 20)
+	//_ = brain.InjectNow(10, 30)
+	//_ = brain.InjectNow(11, 22)
+
+	seedID := uint32(100)
+
+	nearest := brain.FindNearestNeurons(seedID, 11)
+	fmt.Println("cluster ids:", nearest)
+
+	if err := brain.InjectCluster(seedID, 11, 25); err != nil {
+		panic(err)
 	}
 
-	a := &app{e: e}
-	http.HandleFunc("/step", a.handleStep)
-	http.HandleFunc("/state", a.handleState)
-	http.HandleFunc("/save", a.handleSave)
-	http.HandleFunc("/load", a.handleLoad)
+	for i := 0; i < 10; i++ {
+		fmt.Printf("\n--- BEFORE STEP tick=%d ---\n", brain.Tick)
+		brain.PrintCurrentSlotTargets()
 
-	addr := ":8080"
-	log.Printf("spiking service listening on %s", addr)
-	log.Fatal(http.ListenAndServe(addr, nil))
-}
+		stats := brain.Step()
 
-func (a *app) handleStep(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var req stepRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	if req.Steps <= 0 {
-		req.Steps = 1
+		fmt.Printf(
+			"tick=%d delivered=%d created=%d fired=%d mean_charge=%.2f\n",
+			stats.Tick,
+			stats.DeliveredEvents,
+			stats.CreatedEvents,
+			stats.FiredCount,
+			stats.MeanCharge,
+		)
+
+		brain.PrintTopCharged(10)
 	}
 
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	if err := brain.InjectCluster(seedID, 11, 10); err != nil {
+		panic(err)
+	}
 
-	firedEach := make([][]int, 0, req.Steps)
-	for i := 0; i < req.Steps; i++ {
-		in := req.Inputs
-		if i > 0 {
-			in = nil
-		}
-		firedEach = append(firedEach, a.e.Step(in))
-	}
-	writeJSON(w, stepResponse{Tick: a.e.Tick, FiredEach: firedEach})
-}
+	for i := 0; i < 10; i++ {
+		fmt.Printf("\n--- BEFORE STEP tick=%d ---\n", brain.Tick)
+		brain.PrintCurrentSlotTargets()
 
-func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	a.mu.Lock()
-	s := a.e.Snapshot()
-	a.mu.Unlock()
-	writeJSON(w, s)
-}
+		stats := brain.Step()
 
-func (a *app) handleSave(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var req saveRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	a.mu.Lock()
-	err := a.e.Save(req.Path)
-	a.mu.Unlock()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, map[string]string{"status": "ok"})
-}
+		fmt.Printf(
+			"tick=%d delivered=%d created=%d fired=%d mean_charge=%.2f\n",
+			stats.Tick,
+			stats.DeliveredEvents,
+			stats.CreatedEvents,
+			stats.FiredCount,
+			stats.MeanCharge,
+		)
 
-func (a *app) handleLoad(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
+		brain.PrintTopCharged(10)
 	}
-	var req saveRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	e, err := engine.Load(req.Path)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	a.mu.Lock()
-	a.e = e
-	a.mu.Unlock()
-	writeJSON(w, map[string]string{"status": "ok"})
-}
 
-func writeJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-func envInt(name string, fallback int) int {
-	if v := os.Getenv(name); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
-		}
+	if err := brain.InjectCluster(seedID, 11, 5); err != nil {
+		panic(err)
 	}
-	return fallback
+
+	for i := 0; i < 10; i++ {
+		fmt.Printf("\n--- BEFORE STEP tick=%d ---\n", brain.Tick)
+		brain.PrintCurrentSlotTargets()
+
+		stats := brain.Step()
+
+		fmt.Printf(
+			"tick=%d delivered=%d created=%d fired=%d mean_charge=%.2f\n",
+			stats.Tick,
+			stats.DeliveredEvents,
+			stats.CreatedEvents,
+			stats.FiredCount,
+			stats.MeanCharge,
+		)
+
+		brain.PrintTopCharged(10)
+	}
+
+	stats := brain.Run(20)
+
+	for _, s := range stats {
+		fmt.Printf(
+			"tick=%d delivered=%d created=%d fired=%d mean_charge=%.2f\n",
+			s.Tick,
+			s.DeliveredEvents,
+			s.CreatedEvents,
+			s.FiredCount,
+			s.MeanCharge,
+		)
+	}
 }
