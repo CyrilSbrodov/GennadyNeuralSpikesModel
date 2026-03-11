@@ -7,7 +7,7 @@ import (
 
 type neuronDistance struct {
 	ID   uint32
-	Dist float64
+	Dist float64 // Расстояние до какого-то опорного нейрона для поиска ближайших соседей / построения локального кластера / сортировки нейронов по расстоянию
 }
 
 func (e *Engine) FindNearestNeurons(seedID uint32, count int) []uint32 {

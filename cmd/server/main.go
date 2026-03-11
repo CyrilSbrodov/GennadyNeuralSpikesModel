@@ -57,15 +57,19 @@ func main() {
 		fmt.Printf("\n--- BEFORE STEP tick=%d ---\n", brain.Tick)
 		brain.PrintCurrentSlotTargets()
 
-		stats := brain.Step()
+		s := brain.Step()
 
 		fmt.Printf(
-			"tick=%d delivered=%d created=%d fired=%d mean_charge=%.2f\n",
-			stats.Tick,
-			stats.DeliveredEvents,
-			stats.CreatedEvents,
-			stats.FiredCount,
-			stats.MeanCharge,
+			"tick=%d delivered=%d created=%d fired=%d near=%d updatedWeights=%d meanCharge=%.2f meanWeight=%.3f meanAbsWeight=%.3f\n",
+			s.Tick,
+			s.DeliveredEvents,
+			s.CreatedEvents,
+			s.FiredCount,
+			s.NearThresholdCount,
+			s.UpdatedWeights,
+			s.MeanCharge,
+			s.MeanWeight,
+			s.MeanAbsWeight,
 		)
 
 		brain.PrintTopCharged(10)
@@ -79,15 +83,19 @@ func main() {
 		fmt.Printf("\n--- BEFORE STEP tick=%d ---\n", brain.Tick)
 		brain.PrintCurrentSlotTargets()
 
-		stats := brain.Step()
+		s := brain.Step()
 
 		fmt.Printf(
-			"tick=%d delivered=%d created=%d fired=%d mean_charge=%.2f\n",
-			stats.Tick,
-			stats.DeliveredEvents,
-			stats.CreatedEvents,
-			stats.FiredCount,
-			stats.MeanCharge,
+			"tick=%d delivered=%d created=%d fired=%d near=%d updatedWeights=%d meanCharge=%.2f meanWeight=%.3f meanAbsWeight=%.3f\n",
+			s.Tick,
+			s.DeliveredEvents,
+			s.CreatedEvents,
+			s.FiredCount,
+			s.NearThresholdCount,
+			s.UpdatedWeights,
+			s.MeanCharge,
+			s.MeanWeight,
+			s.MeanAbsWeight,
 		)
 
 		brain.PrintTopCharged(10)
@@ -101,15 +109,19 @@ func main() {
 		fmt.Printf("\n--- BEFORE STEP tick=%d ---\n", brain.Tick)
 		brain.PrintCurrentSlotTargets()
 
-		stats := brain.Step()
+		s := brain.Step()
 
 		fmt.Printf(
-			"tick=%d delivered=%d created=%d fired=%d mean_charge=%.2f\n",
-			stats.Tick,
-			stats.DeliveredEvents,
-			stats.CreatedEvents,
-			stats.FiredCount,
-			stats.MeanCharge,
+			"tick=%d delivered=%d created=%d fired=%d near=%d updatedWeights=%d meanCharge=%.2f meanWeight=%.3f meanAbsWeight=%.3f\n",
+			s.Tick,
+			s.DeliveredEvents,
+			s.CreatedEvents,
+			s.FiredCount,
+			s.NearThresholdCount,
+			s.UpdatedWeights,
+			s.MeanCharge,
+			s.MeanWeight,
+			s.MeanAbsWeight,
 		)
 
 		brain.PrintTopCharged(10)
@@ -119,12 +131,16 @@ func main() {
 
 	for _, s := range stats {
 		fmt.Printf(
-			"tick=%d delivered=%d created=%d fired=%d mean_charge=%.2f\n",
+			"tick=%d delivered=%d created=%d fired=%d near=%d updatedWeights=%d meanCharge=%.2f meanWeight=%.3f meanAbsWeight=%.3f\n",
 			s.Tick,
 			s.DeliveredEvents,
 			s.CreatedEvents,
 			s.FiredCount,
+			s.NearThresholdCount,
+			s.UpdatedWeights,
 			s.MeanCharge,
+			s.MeanWeight,
+			s.MeanAbsWeight,
 		)
 	}
 }

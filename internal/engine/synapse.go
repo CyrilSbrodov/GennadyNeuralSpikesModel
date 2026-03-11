@@ -2,13 +2,14 @@ package engine
 
 type Synapse struct {
 	ID      uint32
-	FromID  uint32
-	ToID    uint32
-	Weight  float32
-	Delay   uint16
-	Enabled bool
+	FromID  uint32  // ID исходного нейрона
+	ToID    uint32  // ID целевого нейрона
+	Weight  float32 // Вес связи
+	Delay   uint16  // Задержка передачи сигнала
+	Enabled bool    // Включена ли связь
 
-	UseCount        uint64
-	LastUsedTick    uint64
-	PlasticityScore float32
+	UseCount        uint64  // Сколько раз эта связь реально использовалась
+	LastUsedTick    uint64  // Когда эта связь использовалась в последний раз
+	PlasticityScore float32 // Накопленный счёт пластичности. Это уже не обязательная физическая величина, а скорее внутренний след:
+	// насколько связь усиливалась/ослаблялась / как часто участвовала в обучении
 }

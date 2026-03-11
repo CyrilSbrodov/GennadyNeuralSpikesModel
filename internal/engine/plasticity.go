@@ -12,6 +12,7 @@ func (e *Engine) applySTDPPlasticity() int {
 
 	for _, postID := range e.fired {
 		post := &e.Neurons[postID]
+
 		for _, synID := range post.Incoming {
 			if int(synID) >= len(e.Synapses) {
 				continue
@@ -22,25 +23,39 @@ func (e *Engine) applySTDPPlasticity() int {
 				continue
 			}
 
-			pre := e.Neurons[s.FromID]
-			delta := e.Config.HebbianLearningRate * e.Config.HebbianDecay
-			if pre.LastSpikeTick >= 0 {
-				dt := int64(e.Tick) - pre.LastSpikeTick
-				if dt >= 0 && dt <= window {
-					factor := 1 - float32(dt)/float32(e.Config.STDPWindowTicks)
-					delta = e.Config.HebbianLearningRate * e.Config.STDPPotentiation * factor
-				} else {
-					delta = -e.Config.HebbianLearningRate * e.Config.STDPDepression
-				}
+			pre := &e.Neurons[s.FromID]
+			if pre.LastSpikeTick < 0 {
+				continue
+			}
+
+			dt := int64(e.Tick) - pre.LastSpikeTick
+
+			var delta float32
+
+			// pre fired shortly before post -> potentiate
+			if dt >= 0 && dt <= window {
+				factor := 1.0 - float32(dt)/float32(window)
+				delta = e.Config.HebbianLearningRate * e.Config.STDPPotentiation * factor
+			} else if dt < 0 && -dt <= window {
+				// pre fired after post -> depress
+				factor := 1.0 - float32(-dt)/float32(window)
+				delta = -e.Config.HebbianLearningRate * e.Config.STDPDepression * factor
+			} else {
+				// outside STDP window: no direct plasticity update
+				continue
 			}
 
 			if delta == 0 {
 				continue
 			}
 
+			oldWeight := s.Weight
 			s.Weight = e.clampSynapseWeight(s.Weight+delta, pre.Polarity)
 			s.PlasticityScore += delta
-			updated++
+
+			if s.Weight != oldWeight {
+				updated++
+			}
 		}
 	}
 
@@ -48,7 +63,10 @@ func (e *Engine) applySTDPPlasticity() int {
 }
 
 func (e *Engine) applySynapseDecay() int {
-	if e.Config.SynapseUsageDecayInterval == 0 || e.Tick == 0 || e.Tick%e.Config.SynapseUsageDecayInterval != 0 {
+	if e.Config.SynapseUsageDecayInterval == 0 {
+		return 0
+	}
+	if e.Tick == 0 || e.Tick%e.Config.SynapseUsageDecayInterval != 0 {
 		return 0
 	}
 
@@ -61,11 +79,19 @@ func (e *Engine) applySynapseDecay() int {
 			continue
 		}
 
-		if s.UseCount > 0 && e.Tick-s.LastUsedTick < e.Config.SynapseUsageDecayInterval {
+		// do not decay completely untouched synapses yet
+		if s.UseCount == 0 {
+			continue
+		}
+
+		// recently used synapses are preserved
+		if e.Tick-s.LastUsedTick < e.Config.SynapseUsageDecayInterval {
 			continue
 		}
 
 		newWeight := s.Weight * (1.0 - decay)
+
+		// preserve sign
 		if s.Weight > 0 && newWeight < 0 {
 			newWeight = 0
 		}
@@ -74,8 +100,12 @@ func (e *Engine) applySynapseDecay() int {
 		}
 
 		polarity := e.Neurons[s.FromID].Polarity
+		oldWeight := s.Weight
 		s.Weight = e.clampSynapseWeight(newWeight, polarity)
-		updated++
+
+		if s.Weight != oldWeight {
+			updated++
+		}
 	}
 
 	return updated
@@ -116,6 +146,7 @@ func (e *Engine) fillWeightStats(stats *TickStats) {
 
 	var total float32
 	var totalAbs float32
+
 	for _, s := range e.Synapses {
 		total += s.Weight
 		if s.Weight < 0 {

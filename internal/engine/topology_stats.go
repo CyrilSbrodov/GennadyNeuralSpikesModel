@@ -6,32 +6,35 @@ import (
 )
 
 type TopologyStats struct {
-	NeuronCount  int
-	SynapseCount int
+	NeuronCount  int // Сколько нейронов в сети
+	SynapseCount int // Сколько синапсов в сети
 
-	InputCount  int
-	HiddenCount int
-	OutputCount int
+	// Сколько нейронов каждой функциональной роли
+	InputCount  int //
+	HiddenCount int //
+	OutputCount int //
 
-	ExcitatoryCount int
-	InhibitoryCount int
+	ExcitatoryCount int // Сколько возбуждающих нейронов.
+	InhibitoryCount int // Сколько тормозных нейронов.
 
-	MinOutgoing  int
-	MaxOutgoing  int
-	MeanOutgoing float64
+	MinOutgoing  int     // Минимальное число исходящих связей среди нейронов. Показывает, есть ли почти изолированные нейроны
+	MaxOutgoing  int     // Максимальное число исходящих связей. Показывает верхнюю плотность локальной раздачи сигнала.
+	MeanOutgoing float64 // Среднее число исходящих связей на нейрон. Показывает общую плотность графа.
 
-	PositiveSynapses int
-	NegativeSynapses int
-	MeanWeight       float64
-	MeanAbsWeight    float64
+	PositiveSynapses int     // Сколько синапсов с положительным весом.
+	NegativeSynapses int     // Сколько синапсов с отрицательным весом.
+	MeanWeight       float64 // Средний вес синапсов с учётом знака
+	MeanAbsWeight    float64 // Средний модуль веса. Показывает среднюю “силу связи”, неважно положительная она или отрицательная.
 
-	MinDelay  uint16
-	MaxDelay  uint16
-	MeanDelay float64
+	// Статистика временной структуры сети.
+	MinDelay  uint16  // Минимальная задержка сигналов
+	MaxDelay  uint16  // Максимальная задержка сигналов
+	MeanDelay float64 // Средняя задержка сигналов
 
-	MinDistance  float64
-	MaxDistance  float64
-	MeanDistance float64
+	// Показывает, насколько сеть локальна или размазана по пространству
+	MinDistance  float64 // Минимальная длина связи
+	MaxDistance  float64 // Максимальная длина связи
+	MeanDistance float64 // Средняя геометрическая длина связи
 }
 
 func (e *Engine) CollectTopologyStats() TopologyStats {

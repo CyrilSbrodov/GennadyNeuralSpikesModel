@@ -340,6 +340,7 @@ func (e *Engine) Step() TickStats {
 		e.Neurons[i].FiredLastTick = false
 	}
 
+	// phase 1: deliver pending events for current tick
 	slot := e.currentSlot()
 	events := e.pending[slot]
 	stats.DeliveredEvents = len(events)
@@ -353,15 +354,19 @@ func (e *Engine) Step() TickStats {
 		if n.CooldownLeft > 0 {
 			continue
 		}
+
 		n.Charge += event.Delta
 	}
+
 	e.pending[slot] = e.pending[slot][:0]
 
+	// phase 2: update neurons / leak / threshold
 	e.fired = e.fired[:0]
 	var totalCharge float32
 
 	for i := range e.Neurons {
 		n := &e.Neurons[i]
+
 		n.Adaptation *= n.AdaptationDecay
 
 		if n.CooldownLeft > 0 {
@@ -371,19 +376,19 @@ func (e *Engine) Step() TickStats {
 		}
 
 		n.Charge = n.RestCharge + (n.Charge-n.RestCharge)*e.Config.LeakFactor
+
 		effectiveThreshold := n.BaseThreshold + n.Adaptation
 		if n.Charge >= effectiveThreshold {
 			n.FiredLastTick = true
 			e.fired = append(e.fired, n.ID)
 			stats.FiredCount++
-			n.Adaptation += n.AdaptationStep
-			n.LastSpikeTick = int64(e.Tick)
-			n.FireCount++
+		} else {
+			gap := effectiveThreshold - n.Charge
+			if gap > 0 && gap <= 1.0 {
+				stats.NearThresholdCount++
+			}
 		}
 
-		if effectiveThreshold-n.Charge <= 1.0 {
-			stats.NearThresholdCount++
-		}
 		totalCharge += n.Charge
 	}
 
@@ -391,8 +396,14 @@ func (e *Engine) Step() TickStats {
 		stats.MeanCharge = totalCharge / float32(len(e.Neurons))
 	}
 
+	// phase 3: emit spikes from fired neurons
 	for _, neuronID := range e.fired {
 		n := &e.Neurons[neuronID]
+
+		n.Adaptation += n.AdaptationStep
+		n.LastSpikeTick = int64(e.Tick)
+		n.FireCount++
+
 		n.Charge = n.ResetCharge
 		n.CooldownLeft = n.CooldownTicks
 
@@ -408,6 +419,7 @@ func (e *Engine) Step() TickStats {
 
 			s.UseCount++
 			s.LastUsedTick = e.Tick
+
 			delay := s.Delay
 			if delay == 0 {
 				delay = 1
