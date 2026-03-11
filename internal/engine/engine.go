@@ -1,299 +1,481 @@
 package engine
 
 import (
-	"encoding/json"
+	"errors"
 	"fmt"
-	"os"
+	"math"
+	"math/rand"
+
+	"gennady-neural-spikes-model/cmd/config"
 )
 
-type Neuron struct {
-	Charge       float64 `json:"charge"`
-	Threshold    float64 `json:"threshold"`
-	Cooldown     int     `json:"cooldown"`
-	LastFireTick int     `json:"lastFireTick"`
-}
-
-type Config struct {
-	LeakFactor          float64 `json:"leakFactor"`
-	MinWeight           float64 `json:"minWeight"`
-	MaxWeight           float64 `json:"maxWeight"`
-	LearnRate           float64 `json:"learnRate"`
-	ForgetRate          float64 `json:"forgetRate"`
-	LearnWindowTicks    int     `json:"learnWindowTicks"`
-	ForgetAfterInactive int     `json:"forgetAfterInactive"`
-}
-
-type InputSignal struct {
-	NeuronID int     `json:"neuronId"`
-	Charge   float64 `json:"charge"`
-}
-
-type Snapshot struct {
-	Tick       int       `json:"tick"`
-	Neurons    []Neuron  `json:"neurons"`
-	SynTarget  []int     `json:"synTarget"`
-	SynSource  []int     `json:"synSource"`
-	SynWeight  []float64 `json:"synWeight"`
-	SynDelay   []int     `json:"synDelay"`
-	SynPlastic []bool    `json:"synPlastic"`
-	SynOffset  []int     `json:"synOffset"`
-	Config     Config    `json:"config"`
-}
-
-type spikeEvent struct {
-	SynapseID int
-	TargetID  int
-	Weight    float64
-}
-
 type Engine struct {
-	Tick int
+	Neurons  []Neuron
+	Synapses []Synapse
+	Config   *config.Config
 
-	Neurons []Neuron
+	Tick uint64
 
-	SynTarget   []int
-	SynSource   []int
-	SynWeight   []float64
-	SynDelay    []int
-	SynPlastic  []bool
-	SynLastUsed []int
-	SynOffset   []int
-
-	InSynOffset []int
-	InSynIndex  []int
-
-	SpikeQueue [][]spikeEvent
-
-	Config Config
+	pending [][]SpikeEvent
+	fired   []uint32
 }
 
-type SynapseDef struct {
-	Source  int     `json:"source"`
-	Target  int     `json:"target"`
-	Weight  float64 `json:"weight"`
-	Delay   int     `json:"delay"`
-	Plastic bool    `json:"plastic"`
-}
-
-func NewEngine(neuronCount int, synapses []SynapseDef, cfg Config) (*Engine, error) {
-	if neuronCount <= 0 {
-		return nil, fmt.Errorf("neuronCount must be > 0")
-	}
-	maxDelay := 1
-	for _, s := range synapses {
-		if s.Source < 0 || s.Source >= neuronCount || s.Target < 0 || s.Target >= neuronCount {
-			return nil, fmt.Errorf("invalid synapse (%d -> %d)", s.Source, s.Target)
-		}
-		if s.Delay <= 0 {
-			return nil, fmt.Errorf("delay must be > 0")
-		}
-		if s.Delay > maxDelay {
-			maxDelay = s.Delay
-		}
+func NewEngine(cfg *config.Config) *Engine {
+	if err := validateConfig(cfg); err != nil {
+		panic(err)
 	}
 
-	counts := make([]int, neuronCount)
-	for _, s := range synapses {
-		counts[s.Source]++
-	}
-
-	synOffset := make([]int, neuronCount+1)
-	for i := 0; i < neuronCount; i++ {
-		synOffset[i+1] = synOffset[i] + counts[i]
-	}
-
-	target := make([]int, len(synapses))
-	source := make([]int, len(synapses))
-	weight := make([]float64, len(synapses))
-	delay := make([]int, len(synapses))
-	plastic := make([]bool, len(synapses))
-	lastUsed := make([]int, len(synapses))
-	for i := range lastUsed {
-		lastUsed[i] = -1
-	}
-
-	writePos := append([]int(nil), synOffset[:neuronCount]...)
-	for _, s := range synapses {
-		idx := writePos[s.Source]
-		writePos[s.Source]++
-		target[idx] = s.Target
-		source[idx] = s.Source
-		weight[idx] = s.Weight
-		delay[idx] = s.Delay
-		plastic[idx] = s.Plastic
-	}
-
-	inCounts := make([]int, neuronCount)
-	for _, t := range target {
-		inCounts[t]++
-	}
-	inOffset := make([]int, neuronCount+1)
-	for i := 0; i < neuronCount; i++ {
-		inOffset[i+1] = inOffset[i] + inCounts[i]
-	}
-	inIndex := make([]int, len(target))
-	inWrite := append([]int(nil), inOffset[:neuronCount]...)
-	for synID := range target {
-		t := target[synID]
-		idx := inWrite[t]
-		inWrite[t]++
-		inIndex[idx] = synID
-	}
-
-	neurons := make([]Neuron, neuronCount)
-	for i := range neurons {
-		neurons[i] = Neuron{Threshold: 75, Cooldown: 2, LastFireTick: -1}
-	}
+	pendingSize := int(cfg.MaxDelay) + 1
 
 	return &Engine{
-		Neurons:     neurons,
-		SynTarget:   target,
-		SynSource:   source,
-		SynWeight:   weight,
-		SynDelay:    delay,
-		SynPlastic:  plastic,
-		SynLastUsed: lastUsed,
-		SynOffset:   synOffset,
-		InSynOffset: inOffset,
-		InSynIndex:  inIndex,
-		SpikeQueue:  make([][]spikeEvent, maxDelay+1),
-		Config:      cfg,
-	}, nil
+		Config:  cfg,
+		pending: make([][]SpikeEvent, pendingSize),
+		fired:   make([]uint32, 0, 128),
+	}
 }
 
-func (e *Engine) Step(inputs []InputSignal) []int {
-	for _, in := range inputs {
-		if in.NeuronID < 0 || in.NeuronID >= len(e.Neurons) {
-			continue
-		}
-		e.Neurons[in.NeuronID].Charge += in.Charge
+func validateConfig(cfg *config.Config) error {
+	if cfg == nil {
+		return errors.New("config is nil")
+	}
+	if cfg.NeuronLimit <= 0 {
+		return errors.New("NeuronLimit must be > 0")
+	}
+	if cfg.SynapseLimit <= 0 {
+		return errors.New("SynapseLimit must be > 0")
+	}
+	if cfg.SynapsesPerNeuron <= 0 {
+		return errors.New("SynapsesPerNeuron must be > 0")
+	}
+	if cfg.WorldSizeX <= 0 || cfg.WorldSizeY <= 0 || cfg.WorldSizeZ <= 0 {
+		return errors.New("world size must be > 0")
+	}
+	if cfg.MaxAxonLength <= 0 {
+		return errors.New("MaxAxonLength must be > 0")
+	}
+	if cfg.LocalConnectRadius <= 0 {
+		return errors.New("LocalConnectRadius must be > 0")
+	}
+	if cfg.LocalConnectRadius > cfg.MaxAxonLength {
+		return errors.New("LocalConnectRadius cannot exceed MaxAxonLength")
+	}
+	if cfg.MinDelay == 0 {
+		return errors.New("MinDelay must be >= 1")
+	}
+	if cfg.MaxDelay < cfg.MinDelay {
+		return errors.New("MaxDelay must be >= MinDelay")
+	}
+	if cfg.ExcitatoryRatio < 0 || cfg.InhibitoryRatio < 0 {
+		return errors.New("polarity ratios cannot be negative")
+	}
+	if math.Abs(float64(cfg.ExcitatoryRatio+cfg.InhibitoryRatio-1.0)) > 0.0001 {
+		return fmt.Errorf("ExcitatoryRatio + InhibitoryRatio must be 1.0")
+	}
+	if cfg.InputRatio < 0 || cfg.OutputRatio < 0 || cfg.InputRatio+cfg.OutputRatio >= 1.0 {
+		return errors.New("invalid input/output ratios")
+	}
+	if cfg.LongConnectionProb < 0 || cfg.LongConnectionProb > 1 {
+		return errors.New("LongConnectionProb must be in [0,1]")
+	}
+	return nil
+}
+
+func (e *Engine) InitSpatial3D() {
+	e.Neurons = nil
+	e.Synapses = nil
+	e.Tick = 0
+
+	for i := range e.pending {
+		e.pending[i] = e.pending[i][:0]
 	}
 
-	bucket := e.Tick % len(e.SpikeQueue)
-	for _, ev := range e.SpikeQueue[bucket] {
-		e.Neurons[ev.TargetID].Charge += ev.Weight
-		e.SynLastUsed[ev.SynapseID] = e.Tick
-	}
-	e.SpikeQueue[bucket] = e.SpikeQueue[bucket][:0]
+	e.initNeurons3D()
+	e.initSynapsesSpatial()
+}
 
-	fired := make([]int, 0)
-	for i := range e.Neurons {
-		n := &e.Neurons[i]
-		n.Charge *= e.Config.LeakFactor
-		if n.LastFireTick >= 0 && e.Tick-n.LastFireTick < n.Cooldown {
-			continue
+func (e *Engine) initNeurons3D() {
+	rng := rand.New(rand.NewSource(e.Config.Seed))
+	e.Neurons = make([]Neuron, e.Config.NeuronLimit)
+
+	inputCount := int(float32(e.Config.NeuronLimit) * e.Config.InputRatio)
+	outputCount := int(float32(e.Config.NeuronLimit) * e.Config.OutputRatio)
+
+	for i := 0; i < e.Config.NeuronLimit; i++ {
+		thresholdNoise := rng.Float32()*4 - 2 // -2..+2
+
+		role := RoleHidden
+		switch {
+		case i < inputCount:
+			role = RoleInput
+		case i >= e.Config.NeuronLimit-outputCount:
+			role = RoleOutput
 		}
-		if n.Charge >= n.Threshold {
-			n.Charge = 0
-			n.LastFireTick = e.Tick
-			fired = append(fired, i)
+
+		polarity := choosePolarity(rng, e.Config.ExcitatoryRatio)
+
+		e.Neurons[i] = Neuron{
+			ID: uint32(i),
+
+			Polarity: polarity,
+			Role:     role,
+
+			Position: Vec3{
+				X: rng.Float32() * e.Config.WorldSizeX,
+				Y: rng.Float32() * e.Config.WorldSizeY,
+				Z: rng.Float32() * e.Config.WorldSizeZ,
+			},
+
+			Charge:      e.Config.NeuronCharge,
+			RestCharge:  e.Config.NeuronRestCharge,
+			Threshold:   e.Config.NeuronThreshold + thresholdNoise,
+			ResetCharge: e.Config.NeuronResetCharge,
+
+			CooldownTicks: 2,
+			CooldownLeft:  0,
+
+			Outgoing:      nil,
+			FiredLastTick: false,
 		}
 	}
+}
 
-	for _, src := range fired {
-		start, end := e.SynOffset[src], e.SynOffset[src+1]
-		for synID := start; synID < end; synID++ {
-			deliverTick := (e.Tick + e.SynDelay[synID]) % len(e.SpikeQueue)
-			e.SpikeQueue[deliverTick] = append(e.SpikeQueue[deliverTick], spikeEvent{
-				SynapseID: synID,
-				TargetID:  e.SynTarget[synID],
-				Weight:    e.SynWeight[synID],
-			})
-			e.SynLastUsed[synID] = e.Tick
-		}
+func choosePolarity(rng *rand.Rand, excitatoryRatio float32) NeuronPolarity {
+	if rng.Float32() < excitatoryRatio {
+		return PolarityExcitatory
+	}
+	return PolarityInhibitory
+}
+
+func (e *Engine) initSynapsesSpatial() {
+	rng := rand.New(rand.NewSource(e.Config.Seed + 1))
+	n := len(e.Neurons)
+	if n == 0 {
+		return
 	}
 
-	for _, dst := range fired {
-		start, end := e.InSynOffset[dst], e.InSynOffset[dst+1]
-		for i := start; i < end; i++ {
-			synID := e.InSynIndex[i]
-			if !e.SynPlastic[synID] {
+	used := make(map[uint64]struct{})
+	maxAxonLenSq := e.Config.MaxAxonLength * e.Config.MaxAxonLength
+	localRadiusSq := e.Config.LocalConnectRadius * e.Config.LocalConnectRadius
+
+	for from := 0; from < n; from++ {
+		if len(e.Synapses) >= e.Config.SynapseLimit {
+			return
+		}
+
+		created := 0
+		attempts := 0
+		maxAttempts := e.Config.SynapsesPerNeuron * 60
+
+		for created < e.Config.SynapsesPerNeuron && attempts < maxAttempts {
+			attempts++
+
+			to := rng.Intn(n)
+			if to == from {
 				continue
 			}
-			src := e.SynSource[synID]
-			srcFire := e.Neurons[src].LastFireTick
-			if srcFire >= 0 && dst != src && e.Tick-srcFire <= e.Config.LearnWindowTicks {
-				e.SynWeight[synID] += e.Config.LearnRate
-				if e.SynWeight[synID] > e.Config.MaxWeight {
-					e.SynWeight[synID] = e.Config.MaxWeight
-				}
+
+			key := uint64(from)<<32 | uint64(to)
+			if _, exists := used[key]; exists {
+				continue
 			}
+
+			distSq := distanceSq(e.Neurons[from].Position, e.Neurons[to].Position)
+			if distSq > maxAxonLenSq {
+				continue
+			}
+
+			if !shouldConnect(rng, distSq, localRadiusSq, maxAxonLenSq, e.Config.LongConnectionProb) {
+				continue
+			}
+
+			if len(e.Synapses) >= e.Config.SynapseLimit {
+				return
+			}
+
+			used[key] = struct{}{}
+
+			dist := float32(math.Sqrt(float64(distSq)))
+			delay := computeDelay(dist, e.Config.MaxAxonLength, e.Config.MinDelay, e.Config.MaxDelay)
+			weight := computeWeight(e.Neurons[from].Polarity, rng)
+
+			s := Synapse{
+				ID:      uint32(len(e.Synapses)),
+				FromID:  uint32(from),
+				ToID:    uint32(to),
+				Weight:  weight,
+				Delay:   delay,
+				Enabled: true,
+			}
+
+			e.Synapses = append(e.Synapses, s)
+			e.Neurons[from].Outgoing = append(e.Neurons[from].Outgoing, s.ID)
+			created++
 		}
 	}
+}
 
-	for synID := range e.SynWeight {
-		if e.SynLastUsed[synID] >= 0 && e.Tick-e.SynLastUsed[synID] >= e.Config.ForgetAfterInactive {
-			e.SynWeight[synID] -= e.Config.ForgetRate
-			if e.SynWeight[synID] < e.Config.MinWeight {
-				e.SynWeight[synID] = e.Config.MinWeight
-			}
-		}
+func shouldConnect(
+	rng *rand.Rand,
+	distSq float32,
+	localRadiusSq float32,
+	maxAxonLenSq float32,
+	longProb float32,
+) bool {
+	if distSq <= localRadiusSq {
+		return true
 	}
 
+	// плавное падение вероятности по расстоянию
+	distNorm := distSq / maxAxonLenSq
+	p := longProb * (1.0 - distNorm)
+	if p < 0 {
+		p = 0
+	}
+	return rng.Float32() < p
+}
+
+func computeWeight(polarity NeuronPolarity, rng *rand.Rand) float32 {
+	base := 1.5 + rng.Float32()*2.5
+	if polarity == PolarityInhibitory {
+		return -base
+	}
+	return base
+}
+
+func computeDelay(dist, maxDist float32, minDelay, maxDelay uint16) uint16 {
+	if maxDelay <= minDelay || maxDist <= 0 {
+		return minDelay
+	}
+
+	norm := dist / maxDist
+	if norm < 0 {
+		norm = 0
+	}
+	if norm > 1 {
+		norm = 1
+	}
+
+	span := float32(maxDelay - minDelay)
+	return minDelay + uint16(norm*span)
+}
+
+func distanceSq(a, b Vec3) float32 {
+	dx := a.X - b.X
+	dy := a.Y - b.Y
+	dz := a.Z - b.Z
+	return dx*dx + dy*dy + dz*dz
+}
+
+func (e *Engine) InjectNow(targetNeuronID uint32, delta float32) error {
+	if int(targetNeuronID) >= len(e.Neurons) {
+		return errors.New("targetNeuronID is out of range")
+	}
+
+	slot := e.currentSlot()
+	e.pending[slot] = append(e.pending[slot], SpikeEvent{
+		TargetNeuronID: targetNeuronID,
+		Delta:          delta,
+	})
+
+	return nil
+}
+
+func (e *Engine) InjectAfter(delay uint16, targetNeuronID uint32, delta float32) error {
+	if int(targetNeuronID) >= len(e.Neurons) {
+		return errors.New("targetNeuronID is out of range")
+	}
+	slot := e.slotForDelay(delay)
+	e.pending[slot] = append(e.pending[slot], SpikeEvent{
+		TargetNeuronID: targetNeuronID,
+		Delta:          delta,
+	})
+	return nil
+}
+
+func (e *Engine) Run(steps int) []TickStats {
+	stats := make([]TickStats, 0, steps)
+	for i := 0; i < steps; i++ {
+		stats = append(stats, e.Step())
+	}
+	return stats
+}
+
+func (e *Engine) Step() TickStats {
+	stats := TickStats{
+		Tick: e.Tick,
+	}
+
+	// сброс флага firing с прошлого тика
+	for i := range e.Neurons {
+		e.Neurons[i].FiredLastTick = false
+	}
+
+	// Фаза 1 - доставка pending для текущего тика
+	slot := e.currentSlot()
+	events := e.pending[slot]
+	stats.DeliveredEvents = len(events)
+
+	for _, event := range events {
+		if int(event.TargetNeuronID) >= len(e.Neurons) {
+			continue
+		}
+
+		n := &e.Neurons[event.TargetNeuronID]
+
+		// для v1 игнорируем вход во время cooldown
+		if n.CooldownLeft > 0 {
+			continue
+		}
+
+		n.Charge += event.Delta
+	}
+
+	// очищаем слот, оставляя capacity
+	e.pending[slot] = e.pending[slot][:0]
+
+	// фаза 2 - обновление нейронов / leak / threshold
+	e.fired = e.fired[:0]
+
+	var totalCharge float32
+
+	for i := range e.Neurons {
+		n := &e.Neurons[i]
+
+		if n.CooldownLeft > 0 {
+			n.CooldownLeft--
+			totalCharge += n.Charge
+			continue
+		}
+
+		// leak к rest charge
+		n.Charge = n.RestCharge + (n.Charge-n.RestCharge)*0.98
+
+		if n.Charge >= n.Threshold {
+			n.FiredLastTick = true
+			e.fired = append(e.fired, n.ID)
+			stats.FiredCount++
+		}
+
+		totalCharge += n.Charge
+	}
+
+	if len(e.Neurons) > 0 {
+		stats.MeanCharge = totalCharge / float32(len(e.Neurons))
+	}
+
+	// фаза 3 - emit spikes from fired neurons
+	for _, neuronID := range e.fired {
+		n := &e.Neurons[neuronID]
+
+		n.Charge = n.ResetCharge
+		n.CooldownLeft = n.CooldownTicks
+
+		for _, synapseID := range n.Outgoing {
+			if int(synapseID) >= len(e.Synapses) {
+				continue
+			}
+
+			s := e.Synapses[synapseID]
+			if !s.Enabled {
+				continue
+			}
+
+			delay := s.Delay
+			if delay == 0 {
+				delay = 1
+			}
+
+			futureSlot := e.slotForDelay(delay)
+			e.pending[futureSlot] = append(e.pending[futureSlot], SpikeEvent{
+				TargetNeuronID: s.ToID,
+				Delta:          s.Weight,
+			})
+			stats.CreatedEvents++
+		}
+	}
 	e.Tick++
-	return fired
+	return stats
 }
 
-func (e *Engine) Snapshot() Snapshot {
-	return Snapshot{
-		Tick:       e.Tick,
-		Neurons:    append([]Neuron(nil), e.Neurons...),
-		SynTarget:  append([]int(nil), e.SynTarget...),
-		SynSource:  append([]int(nil), e.SynSource...),
-		SynWeight:  append([]float64(nil), e.SynWeight...),
-		SynDelay:   append([]int(nil), e.SynDelay...),
-		SynPlastic: append([]bool(nil), e.SynPlastic...),
-		SynOffset:  append([]int(nil), e.SynOffset...),
-		Config:     e.Config,
-	}
+func (e *Engine) currentSlot() int {
+	return int(e.Tick % uint64(len(e.pending)))
 }
 
-func (e *Engine) Save(path string) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
+func (e *Engine) slotForDelay(delay uint16) int {
+	if int(delay) == 0 {
+		delay = 1
 	}
-	defer f.Close()
-	enc := json.NewEncoder(f)
-	enc.SetIndent("", "  ")
-	return enc.Encode(e)
+	return int((e.Tick + uint64(delay)) % uint64(len(e.pending)))
 }
 
-func Load(path string) (*Engine, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
+func (e *Engine) PrintDelayHistogram() {
+	if len(e.Synapses) == 0 {
+		fmt.Println("Delay histogram: no synapses")
+		return
 	}
-	defer f.Close()
 
-	var e Engine
-	if err := json.NewDecoder(f).Decode(&e); err != nil {
-		return nil, err
+	hist := make(map[uint16]int)
+	for _, s := range e.Synapses {
+		hist[s.Delay]++
 	}
-	if len(e.SpikeQueue) == 0 {
-		e.SpikeQueue = make([][]spikeEvent, 8)
+
+	fmt.Println("=== Delay Histogram ===")
+	for d := e.Config.MinDelay; d <= e.Config.MaxDelay; d++ {
+		fmt.Printf("delay=%d count=%d\n", d, hist[d])
 	}
-	if len(e.InSynOffset) == 0 || len(e.InSynIndex) == 0 {
-		e.rebuildIncoming()
-	}
-	return &e, nil
+	fmt.Println("=======================")
 }
 
-func (e *Engine) rebuildIncoming() {
-	neuronCount := len(e.Neurons)
-	counts := make([]int, neuronCount)
-	for _, t := range e.SynTarget {
-		counts[t]++
+func (e *Engine) PrintOutgoingHistogram() {
+	if len(e.Neurons) == 0 {
+		fmt.Println("Outgoing histogram: no neurons")
+		return
 	}
-	e.InSynOffset = make([]int, neuronCount+1)
-	for i := 0; i < neuronCount; i++ {
-		e.InSynOffset[i+1] = e.InSynOffset[i] + counts[i]
+
+	hist := make(map[int]int)
+	for _, n := range e.Neurons {
+		hist[len(n.Outgoing)]++
 	}
-	e.InSynIndex = make([]int, len(e.SynTarget))
-	write := append([]int(nil), e.InSynOffset[:neuronCount]...)
-	for synID, t := range e.SynTarget {
-		idx := write[t]
-		write[t]++
-		e.InSynIndex[idx] = synID
+
+	fmt.Println("=== Outgoing Histogram ===")
+	for i := 0; i <= e.Config.SynapsesPerNeuron; i++ {
+		fmt.Printf("outgoing=%d count=%d\n", i, hist[i])
 	}
+	fmt.Println("==========================")
+}
+
+func (e *Engine) ValidateTopology() error {
+	for i, n := range e.Neurons {
+		if n.ID != uint32(i) {
+			return fmt.Errorf("neuron id mismatch: index=%d id=%d", i, n.ID)
+		}
+
+		for _, synID := range n.Outgoing {
+			if int(synID) >= len(e.Synapses) {
+				return fmt.Errorf("neuron %d has invalid outgoing synapse id %d", n.ID, synID)
+			}
+
+			s := e.Synapses[synID]
+			if s.FromID != n.ID {
+				return fmt.Errorf(
+					"outgoing mismatch: neuron=%d synapse=%d synapse.FromID=%d",
+					n.ID, s.ID, s.FromID,
+				)
+			}
+		}
+	}
+
+	for i, s := range e.Synapses {
+		if s.ID != uint32(i) {
+			return fmt.Errorf("synapse id mismatch: index=%d id=%d", i, s.ID)
+		}
+		if int(s.FromID) >= len(e.Neurons) {
+			return fmt.Errorf("synapse %d has invalid FromID=%d", s.ID, s.FromID)
+		}
+		if int(s.ToID) >= len(e.Neurons) {
+			return fmt.Errorf("synapse %d has invalid ToID=%d", s.ID, s.ToID)
+		}
+	}
+
+	return nil
 }
