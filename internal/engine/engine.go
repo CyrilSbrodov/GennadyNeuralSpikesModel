@@ -77,6 +77,30 @@ func validateConfig(cfg *config.Config) error {
 	if cfg.LongConnectionProb < 0 || cfg.LongConnectionProb > 1 {
 		return errors.New("LongConnectionProb must be in [0,1]")
 	}
+	if cfg.LeakFactor < 0 || cfg.LeakFactor > 1 {
+		return errors.New("LeakFactor must be in [0,1]")
+	}
+	if cfg.ExcitatoryWeightMin > cfg.ExcitatoryWeightMax {
+		return errors.New("ExcitatoryWeightMin must be <= ExcitatoryWeightMax")
+	}
+	if cfg.InhibitoryWeightMin > cfg.InhibitoryWeightMax {
+		return errors.New("InhibitoryWeightMin must be <= InhibitoryWeightMax")
+	}
+	if cfg.InhibitoryWeightMax > 0 {
+		return errors.New("InhibitoryWeightMax must be <= 0")
+	}
+	if cfg.ExcitatoryWeightMin < 0 {
+		return errors.New("ExcitatoryWeightMin must be >= 0")
+	}
+	if cfg.WeightMin > cfg.WeightMax {
+		return errors.New("WeightMin must be <= WeightMax")
+	}
+	if cfg.STDPWindowTicks == 0 {
+		return errors.New("STDPWindowTicks must be > 0")
+	}
+	if cfg.SynapseUsageDecayInterval == 0 {
+		return errors.New("SynapseUsageDecayInterval must be > 0")
+	}
 	return nil
 }
 
@@ -101,7 +125,8 @@ func (e *Engine) initNeurons3D() {
 	outputCount := int(float32(e.Config.NeuronLimit) * e.Config.OutputRatio)
 
 	for i := 0; i < e.Config.NeuronLimit; i++ {
-		thresholdNoise := rng.Float32()*4 - 2 // -2..+2
+		noiseAmp := e.Config.ThresholdNoise
+		thresholdNoise := rng.Float32()*(noiseAmp*2) - noiseAmp
 
 		role := RoleHidden
 		switch {
@@ -125,15 +150,21 @@ func (e *Engine) initNeurons3D() {
 				Z: rng.Float32() * e.Config.WorldSizeZ,
 			},
 
-			Charge:      e.Config.NeuronCharge,
-			RestCharge:  e.Config.NeuronRestCharge,
-			Threshold:   e.Config.NeuronThreshold + thresholdNoise,
-			ResetCharge: e.Config.NeuronResetCharge,
+			Charge:          e.Config.RestCharge,
+			RestCharge:      e.Config.RestCharge,
+			BaseThreshold:   e.Config.BaseThreshold + thresholdNoise,
+			ResetCharge:     e.Config.ResetCharge,
+			Adaptation:      0,
+			AdaptationDecay: e.Config.AdaptationDecay,
+			AdaptationStep:  e.Config.AdaptationStep,
+			LastSpikeTick:   -1,
+			FireCount:       0,
 
-			CooldownTicks: 2,
+			CooldownTicks: e.Config.CooldownTicks,
 			CooldownLeft:  0,
 
 			Outgoing:      nil,
+			Incoming:      nil,
 			FiredLastTick: false,
 		}
 	}
@@ -196,7 +227,7 @@ func (e *Engine) initSynapsesSpatial() {
 
 			dist := float32(math.Sqrt(float64(distSq)))
 			delay := computeDelay(dist, e.Config.MaxAxonLength, e.Config.MinDelay, e.Config.MaxDelay)
-			weight := computeWeight(e.Neurons[from].Polarity, rng)
+			weight := e.computeWeight(e.Neurons[from].Polarity, rng)
 
 			s := Synapse{
 				ID:      uint32(len(e.Synapses)),
@@ -209,6 +240,7 @@ func (e *Engine) initSynapsesSpatial() {
 
 			e.Synapses = append(e.Synapses, s)
 			e.Neurons[from].Outgoing = append(e.Neurons[from].Outgoing, s.ID)
+			e.Neurons[to].Incoming = append(e.Neurons[to].Incoming, s.ID)
 			created++
 		}
 	}
@@ -234,12 +266,11 @@ func shouldConnect(
 	return rng.Float32() < p
 }
 
-func computeWeight(polarity NeuronPolarity, rng *rand.Rand) float32 {
-	base := 1.5 + rng.Float32()*2.5
+func (e *Engine) computeWeight(polarity NeuronPolarity, rng *rand.Rand) float32 {
 	if polarity == PolarityInhibitory {
-		return -base
+		return e.Config.InhibitoryWeightMin + rng.Float32()*(e.Config.InhibitoryWeightMax-e.Config.InhibitoryWeightMin)
 	}
-	return base
+	return e.Config.ExcitatoryWeightMin + rng.Float32()*(e.Config.ExcitatoryWeightMax-e.Config.ExcitatoryWeightMin)
 }
 
 func computeDelay(dist, maxDist float32, minDelay, maxDelay uint16) uint16 {
@@ -305,12 +336,10 @@ func (e *Engine) Step() TickStats {
 		Tick: e.Tick,
 	}
 
-	// сброс флага firing с прошлого тика
 	for i := range e.Neurons {
 		e.Neurons[i].FiredLastTick = false
 	}
 
-	// Фаза 1 - доставка pending для текущего тика
 	slot := e.currentSlot()
 	events := e.pending[slot]
 	stats.DeliveredEvents = len(events)
@@ -321,25 +350,19 @@ func (e *Engine) Step() TickStats {
 		}
 
 		n := &e.Neurons[event.TargetNeuronID]
-
-		// для v1 игнорируем вход во время cooldown
 		if n.CooldownLeft > 0 {
 			continue
 		}
-
 		n.Charge += event.Delta
 	}
-
-	// очищаем слот, оставляя capacity
 	e.pending[slot] = e.pending[slot][:0]
 
-	// фаза 2 - обновление нейронов / leak / threshold
 	e.fired = e.fired[:0]
-
 	var totalCharge float32
 
 	for i := range e.Neurons {
 		n := &e.Neurons[i]
+		n.Adaptation *= n.AdaptationDecay
 
 		if n.CooldownLeft > 0 {
 			n.CooldownLeft--
@@ -347,15 +370,20 @@ func (e *Engine) Step() TickStats {
 			continue
 		}
 
-		// leak к rest charge
-		n.Charge = n.RestCharge + (n.Charge-n.RestCharge)*0.98
-
-		if n.Charge >= n.Threshold {
+		n.Charge = n.RestCharge + (n.Charge-n.RestCharge)*e.Config.LeakFactor
+		effectiveThreshold := n.BaseThreshold + n.Adaptation
+		if n.Charge >= effectiveThreshold {
 			n.FiredLastTick = true
 			e.fired = append(e.fired, n.ID)
 			stats.FiredCount++
+			n.Adaptation += n.AdaptationStep
+			n.LastSpikeTick = int64(e.Tick)
+			n.FireCount++
 		}
 
+		if effectiveThreshold-n.Charge <= 1.0 {
+			stats.NearThresholdCount++
+		}
 		totalCharge += n.Charge
 	}
 
@@ -363,10 +391,8 @@ func (e *Engine) Step() TickStats {
 		stats.MeanCharge = totalCharge / float32(len(e.Neurons))
 	}
 
-	// фаза 3 - emit spikes from fired neurons
 	for _, neuronID := range e.fired {
 		n := &e.Neurons[neuronID]
-
 		n.Charge = n.ResetCharge
 		n.CooldownLeft = n.CooldownTicks
 
@@ -375,11 +401,13 @@ func (e *Engine) Step() TickStats {
 				continue
 			}
 
-			s := e.Synapses[synapseID]
+			s := &e.Synapses[synapseID]
 			if !s.Enabled {
 				continue
 			}
 
+			s.UseCount++
+			s.LastUsedTick = e.Tick
 			delay := s.Delay
 			if delay == 0 {
 				delay = 1
@@ -393,6 +421,11 @@ func (e *Engine) Step() TickStats {
 			stats.CreatedEvents++
 		}
 	}
+
+	stats.UpdatedWeights += e.applySTDPPlasticity()
+	stats.UpdatedWeights += e.applySynapseDecay()
+	e.fillWeightStats(&stats)
+
 	e.Tick++
 	return stats
 }
@@ -460,6 +493,19 @@ func (e *Engine) ValidateTopology() error {
 				return fmt.Errorf(
 					"outgoing mismatch: neuron=%d synapse=%d synapse.FromID=%d",
 					n.ID, s.ID, s.FromID,
+				)
+			}
+		}
+
+		for _, synID := range n.Incoming {
+			if int(synID) >= len(e.Synapses) {
+				return fmt.Errorf("neuron %d has invalid incoming synapse id %d", n.ID, synID)
+			}
+			s := e.Synapses[synID]
+			if s.ToID != n.ID {
+				return fmt.Errorf(
+					"incoming mismatch: neuron=%d synapse=%d synapse.ToID=%d",
+					n.ID, s.ID, s.ToID,
 				)
 			}
 		}

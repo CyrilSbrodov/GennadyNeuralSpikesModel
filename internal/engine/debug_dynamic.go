@@ -77,11 +77,12 @@ func (e *Engine) PrintTopCharged(limit int) {
 	items := make([]chargedNeuron, 0, len(e.Neurons))
 
 	for _, n := range e.Neurons {
+		effectiveThreshold := n.BaseThreshold + n.Adaptation
 		items = append(items, chargedNeuron{
 			ID:        n.ID,
 			Charge:    n.Charge,
-			Threshold: n.Threshold,
-			Gap:       n.Threshold - n.Charge,
+			Threshold: effectiveThreshold,
+			Gap:       effectiveThreshold - n.Charge,
 		})
 	}
 
