@@ -5,6 +5,7 @@ type SpikeEvent struct {
 	Delta          float32
 }
 
-func (se *SpikeEvent) buildBuffer() [][]SpikeEvent {
-	return [][]SpikeEvent{}
+type TimedSpikeEvent struct {
+	Tick  uint64
+	Event SpikeEvent
 }
