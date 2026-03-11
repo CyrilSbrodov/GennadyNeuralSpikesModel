@@ -24,10 +24,30 @@ type Config struct {
 	MinDelay uint16
 	MaxDelay uint16
 
-	NeuronCharge      float32
-	NeuronRestCharge  float32
-	NeuronThreshold   float32
-	NeuronResetCharge float32
+	RestCharge      float32
+	BaseThreshold   float32
+	ThresholdNoise  float32
+	ResetCharge     float32
+	LeakFactor      float32
+	CooldownTicks   uint16
+	AdaptationDecay float32
+	AdaptationStep  float32
+
+	ExcitatoryWeightMin float32
+	ExcitatoryWeightMax float32
+	InhibitoryWeightMin float32
+	InhibitoryWeightMax float32
+	WeightMin           float32
+	WeightMax           float32
+
+	HebbianEnable             bool
+	HebbianLearningRate       float32
+	HebbianDecay              float32
+	STDPWindowTicks           uint64
+	STDPPotentiation          float32
+	STDPDepression            float32
+	SynapseUsageDecayInterval uint64
+	SynapseUsageWeightDecay   float32
 }
 
 func DefaultConfig() *Config {
@@ -55,9 +75,29 @@ func DefaultConfig() *Config {
 		MinDelay: 1,
 		MaxDelay: 6,
 
-		NeuronCharge:      -70,
-		NeuronRestCharge:  -70,
-		NeuronThreshold:   -60,
-		NeuronResetCharge: -75,
+		RestCharge:      -70,
+		BaseThreshold:   -60,
+		ThresholdNoise:  2,
+		ResetCharge:     -75,
+		LeakFactor:      0.98,
+		CooldownTicks:   2,
+		AdaptationDecay: 0.92,
+		AdaptationStep:  0.8,
+
+		ExcitatoryWeightMin: 1.5,
+		ExcitatoryWeightMax: 4.0,
+		InhibitoryWeightMin: -4.0,
+		InhibitoryWeightMax: -1.5,
+		WeightMin:           -5.0,
+		WeightMax:           5.0,
+
+		HebbianEnable:             true,
+		HebbianLearningRate:       0.03,
+		HebbianDecay:              0.005,
+		STDPWindowTicks:           8,
+		STDPPotentiation:          1.0,
+		STDPDepression:            0.4,
+		SynapseUsageDecayInterval: 16,
+		SynapseUsageWeightDecay:   0.02,
 	}
 }

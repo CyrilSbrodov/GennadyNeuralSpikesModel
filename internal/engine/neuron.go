@@ -29,15 +29,21 @@ type Neuron struct {
 
 	Position Vec3
 
-	Charge      float32
-	RestCharge  float32
-	Threshold   float32
-	ResetCharge float32
+	Charge          float32
+	RestCharge      float32
+	BaseThreshold   float32
+	ResetCharge     float32
+	Adaptation      float32
+	AdaptationDecay float32
+	AdaptationStep  float32
+	LastSpikeTick   int64
+	FireCount       uint64
 
 	CooldownTicks uint16
 	CooldownLeft  uint16
 
 	Outgoing []uint32
+	Incoming []uint32
 
 	FiredLastTick bool
 }

@@ -7,4 +7,8 @@ type Synapse struct {
 	Weight  float32
 	Delay   uint16
 	Enabled bool
+
+	UseCount        uint64
+	LastUsedTick    uint64
+	PlasticityScore float32
 }
