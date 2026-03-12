@@ -48,6 +48,9 @@ type Config struct {
 	STDPDepression            float32 // Сила ослабления связи.
 	SynapseUsageDecayInterval uint64  // Как часто проверять забытые связи.
 	SynapseUsageWeightDecay   float32 // Насколько ослаблять неиспользуемые синапсы. Это имитирует забывание мозга.
+
+	StateFile  string // Путь к файлу состояния
+	SaveOnExit bool   // Сохранять автоматически при завершении
 }
 
 func DefaultConfig() *Config {
@@ -101,5 +104,8 @@ func DefaultConfig() *Config {
 		STDPDepression:            0.25,  // Сила ослабления связи.
 		SynapseUsageDecayInterval: 32,    // Как часто проверять забытые связи.
 		SynapseUsageWeightDecay:   0.01,  // Насколько ослаблять неиспользуемые синапсы. Это имитирует забывание мозга.
+
+		StateFile:  "brain_state.gob", // Путь к файлу состояния
+		SaveOnExit: true,              // Сохранять автоматически при завершении
 	}
 }

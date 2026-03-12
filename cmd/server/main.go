@@ -1,21 +1,44 @@
 package main
 
 import (
+	"flag"
 	"fmt"
-	"gennady-neural-spikes-model/cmd/config"
-	"gennady-neural-spikes-model/internal/dataset"
-	"gennady-neural-spikes-model/internal/engine"
 	"log/slog"
 	"math/rand"
+	"os"
+
+	"gennady-neural-spikes-model/cmd/config"
+	"gennady-neural-spikes-model/internal/engine"
 )
 
 func main() {
+
 	cfg := config.DefaultConfig()
 	if cfg.Seed == 0 {
 		cfg.Seed = int64(rand.Uint64())
 	}
 	slog.Info("Start with:", "seed", cfg.Seed)
-	brain := engine.NewEngine(cfg)
+
+	newBrain := flag.Bool("new", false, "создать новый мозг (игнорировать сохранённый)")
+	flag.Parse()
+
+	if *newBrain {
+		if err := os.Remove(cfg.StateFile); err != nil { // удаляем старый
+			slog.Error("failed to remove old state file", "err", err)
+		}
+	}
+
+	brain, err := engine.LoadOrCreate(cfg)
+	if err != nil {
+		panic(err)
+	}
+	defer func() {
+		if cfg.SaveOnExit {
+			if err := brain.Save(cfg.StateFile); err != nil {
+				fmt.Println("❌ Ошибка сохранения:", err)
+			}
+		}
+	}()
 	brain.InitSpatial3D()
 
 	if err := brain.ValidateTopology(); err != nil {
@@ -26,11 +49,6 @@ func main() {
 	brain.PrintDelayHistogram()
 	brain.PrintOutgoingHistogram()
 
-	samples, err := dataset.Load("data")
-	if err != nil {
-		panic(err)
-	}
-	fmt.Println("Loaded samples:", samples)
 	//_ = brain.InjectNow(0, 30)
 	//_ = brain.InjectNow(1, 18)
 	//_ = brain.InjectNow(2, 22)
